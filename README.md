@@ -1,1 +1,1 @@
-# BTS-demo
+# terraform-demo

@@ -1,9 +1,9 @@
 terraform {
     cloud {
-    organization = "hashicorp-ddr-platform-prod"
+    organization = "maryams-sandbox"
 
     workspaces {
-      name = "BTS-demo"
+      name = "hcp-terraform-demo"
     }
   }
 

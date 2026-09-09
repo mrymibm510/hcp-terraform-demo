@@ -1,0 +1,12 @@
+import "tfplan/v2" as tfplan
+
+required_tags = ["Environment"]
+
+main = rule {
+  all tfplan.resource_changes as _, resource {
+    resource.change.after.tags is not null and
+    all required_tags as tag {
+      resource.change.after.tags[tag] is not null
+    }
+  }
+}
