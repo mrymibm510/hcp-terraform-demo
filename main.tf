@@ -36,7 +36,7 @@ resource "aws_s3_bucket" "hercBucket" {
   }
 }
 resource "aws_s3_bucket" "rentalBucket" {
-  bucket = "hercBucket21"
+  bucket = "hercbucket21"
 
   tags = {
     Name        = "MyDemoBucket2"
