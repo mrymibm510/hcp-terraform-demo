@@ -26,8 +26,8 @@ provider "aws" {
 provider "tfe" {}
 
 
-resource "aws_s3_bucket" "example" {
-  bucket = "mxsbucket987"
+resource "aws_s3_bucket" "hercBucket" {
+  bucket = "mxsbucket786"
 
   tags = {
     Name        = "MyDemoBucket"
@@ -35,8 +35,8 @@ resource "aws_s3_bucket" "example" {
     ManagedBy   = "Terraform"
   }
 }
-resource "aws_s3_bucket" "bucket2" {
-  bucket = "mxsbucket9874"
+resource "aws_s3_bucket" "rentalBucket" {
+  bucket = "hercBucket21"
 
   tags = {
     Name        = "MyDemoBucket2"
