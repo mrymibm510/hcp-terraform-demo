@@ -1,12 +1,370 @@
+# Validates AWS regions in provider configurations and variables.
+# Prevents use of disallowed regions.
+
+# Copyright IBM Corp. 2024, 2025
+
+# Use v2 imports for better compatibility
+import "tfconfig/v2" as tfconfig
 import "tfplan/v2" as tfplan
+import "tfrun"
+import "strings"
+import "types"
 
-required_tags = ["Environment"]
+# Parameters with sensible defaults
+param disallowed_regions default ["sa-east-1"]
 
+# Require explicit region configuration (default: true)
+# When true, providers must have explicit regions, not rely on environment
+param enforce_explicit_regions default true
+
+# Allow use of AWS environment variables (default: false)
+# When false, AWS_DEFAULT_REGION and AWS_PROFILE are not allowed
+param allow_environment_variables default false
+
+# Helper function to safely get nested values with null checking
+get_nested_value = func(obj, path, default_value) {
+	current = obj
+	for strings.split(path, ".") as segment {
+		if current is null {
+			return default_value
+		}
+		if types.type_of(current) is "map" and segment in keys(current) {
+			current = current[segment]
+		} else {
+			return default_value
+		}
+	}
+	return current else default_value
+}
+
+# Extract region from provider configuration with comprehensive null checking
+get_provider_region = func(provider) {
+	# Handle null provider
+	if provider is null {
+		return null
+	}
+
+	# Check if provider has config
+	config = provider.config else {}
+	if config is null or length(config) is 0 {
+		return null
+	}
+
+	# Check for region in config
+	if "region" in keys(config) {
+		region_config = config.region else {}
+
+		# Handle constant value
+		if "constant_value" in keys(region_config) {
+			return region_config.constant_value else null
+		}
+
+		# Handle variable references
+		if "references" in keys(region_config) {
+			references = region_config.references else []
+			if types.type_of(references) is "list" and length(references) > 0 {
+				return process_references(references, provider.module_address else "")
+			}
+		}
+	}
+
+	return null
+}
+
+# Process variable references to resolve actual values
+process_references = func(references, module_address) {
+	for references as reference {
+		if reference is null {
+			continue
+		}
+
+		# Handle Terraform 0.12+ style: var.region
+		if strings.has_prefix(reference, "var.") {
+			var_name = strings.split(reference, ".")[1]
+			return resolve_variable(var_name, module_address)
+		}
+	}
+
+	return null
+}
+
+# Resolve variable values considering module hierarchy
+resolve_variable = func(var_name, module_address) {
+	# First check if it's a root module variable
+	if module_address is "" {
+		if var_name in keys(tfplan.variables) {
+			value = tfplan.variables[var_name].value else null
+
+			# Handle different variable types
+			if types.type_of(value) is "string" {
+				return value
+			} else if types.type_of(value) is "map" {
+				# Check for region key in map
+				if "region" in keys(value) {
+					return value.region
+				} else if "aws_region" in keys(value) {
+					return value.aws_region
+				}
+			}
+		}
+	} else {
+		# Handle module variables
+		return resolve_module_variable(var_name, module_address)
+	}
+
+	return null
+}
+
+# Resolve variables passed to modules
+resolve_module_variable = func(var_name, module_address) {
+	if module_address is "" {
+		return null
+	}
+
+	# Parse module path
+	segments = strings.split(module_address, ".")
+	num_segments = length(segments)
+
+	if num_segments < 2 {
+		return null
+	}
+
+	parent_module = strings.join(segments[0 : num_segments - 2], ".")
+	current_module_name = segments[num_segments - 1]
+
+	# Find module call configuration
+	module_key = current_module_name
+	if parent_module is not "" {
+		module_key = parent_module + ":" + current_module_name
+	}
+
+	if module_key in keys(tfconfig.module_calls) {
+		mc = tfconfig.module_calls[module_key]
+
+		# Check if variable is passed to module
+		if mc.config is not null and var_name in keys(mc.config) {
+			mc_var = mc.config[var_name]
+
+			# Handle constant value
+			if "constant_value" in keys(mc_var) {
+				return mc_var.constant_value
+			}
+
+			# Handle references (recursive resolution)
+			if "references" in keys(mc_var) and parent_module is "" {
+				return process_references(mc_var.references, parent_module)
+			}
+		}
+	}
+
+	# Check module variable defaults
+	module_vars = tfconfig.variables else {}
+	if var_name in keys(module_vars) {
+		default_value = module_vars[var_name].default else null
+		if types.type_of(default_value) is "string" {
+			return default_value
+		} else if types.type_of(default_value) is "map" {
+			if "region" in keys(default_value) {
+				return default_value.region
+			}
+		}
+	}
+
+	return null
+}
+
+# Find all AWS providers including aliases
+find_aws_providers = func() {
+	providers = {}
+
+	# Process all providers
+	for tfconfig.providers as key, provider {
+		if provider is null {
+			continue
+		}
+
+		# Check if it's an AWS provider
+		provider_type = ""
+		if "provider_config_key" in keys(provider) {
+			config_key = provider.provider_config_key else ""
+
+			# Handle format: "aws" or "module.name:aws" or "aws.alias"
+			if config_key matches "^(.*:)?aws(\\..*)?$" {
+				provider_type = "aws"
+			}
+		}
+
+		if provider_type is "aws" {
+			# Handle empty alias (default provider)
+			alias = key
+			if alias is "" {
+				alias = "default"
+			}
+
+			providers[alias] = provider
+		}
+	}
+
+	return providers
+}
+
+# Check environment variables for AWS configuration
+check_environment_variables = func() {
+	violations = []
+
+	env_vars = tfrun.variables else {}
+
+	# Check for AWS_DEFAULT_REGION
+	if "AWS_DEFAULT_REGION" in keys(env_vars) {
+		region = env_vars.AWS_DEFAULT_REGION else ""
+		if region in disallowed_regions {
+			append(violations, {
+				"type":     "environment_variable",
+				"variable": "AWS_DEFAULT_REGION",
+				"value":    region,
+				"message":  "Environment variable AWS_DEFAULT_REGION is set to disallowed region: " + region,
+			})
+		} else if enforce_explicit_regions and not allow_environment_variables {
+			append(violations, {
+				"type":     "environment_variable",
+				"variable": "AWS_DEFAULT_REGION",
+				"value":    region,
+				"message":  "Use of AWS_DEFAULT_REGION environment variable is not allowed. Define region explicitly in provider configuration.",
+			})
+		}
+	}
+
+	# Check for AWS_PROFILE (which might imply a default region)
+	if "AWS_PROFILE" in keys(env_vars) and not allow_environment_variables {
+		append(violations, {
+			"type":     "environment_variable",
+			"variable": "AWS_PROFILE",
+			"value":    env_vars.AWS_PROFILE else "",
+			"message":  "Use of AWS_PROFILE environment variable is not allowed. Configure provider explicitly.",
+		})
+	}
+
+	return violations
+}
+
+# Validate providers
+validate_providers = func() {
+	violations = []
+	aws_providers = find_aws_providers()
+
+	# Track if we found any explicit regions
+	found_explicit_region = false
+
+	for aws_providers as alias, provider {
+		region = get_provider_region(provider)
+
+		if region is not null {
+			found_explicit_region = true
+
+			# Check if region is disallowed
+			if region in disallowed_regions {
+				append(violations, {
+					"type":    "provider",
+					"alias":   alias,
+					"region":  region,
+					"message": "AWS provider '" + alias + "' uses disallowed region: " + region,
+				})
+			}
+		} else if enforce_explicit_regions {
+			# No explicit region found
+			append(violations, {
+				"type":    "provider",
+				"alias":   alias,
+				"region":  "undefined",
+				"message": "AWS provider '" + alias + "' does not have an explicit region defined. This may use environment variables or instance metadata.",
+			})
+		}
+	}
+
+	# If no providers have explicit regions and we're enforcing, that's a problem
+	if length(aws_providers) > 0 and not found_explicit_region and enforce_explicit_regions {
+		append(violations, {
+			"type":    "configuration",
+			"message": "No AWS providers have explicit regions defined. All providers rely on environment or defaults.",
+		})
+	}
+
+	return violations
+}
+
+# Validate region and aws_region variables
+validate_region_variables = func() {
+	violations = []
+
+	# Check tfplan variables
+	for ["region", "aws_region"] as var_name {
+		if var_name in keys(tfplan.variables) {
+			var_data = tfplan.variables[var_name]
+			value = var_data.value else null
+
+			if value is not null {
+				# Handle string values
+				if types.type_of(value) is "string" and value in disallowed_regions {
+					append(violations, {
+						"type":    "variable",
+						"name":    var_name,
+						"value":   value,
+						"message": "Variable '" + var_name + "' is set to disallowed region: " + value,
+					})
+				}
+
+				# Handle map values
+				if types.type_of(value) is "map" {
+					for value as key, region {
+						if types.type_of(region) is "string" and region in disallowed_regions {
+							append(violations, {
+								"type":    "variable",
+								"name":    var_name + "[" + key + "]",
+								"value":   region,
+								"message": "Variable '" + var_name + "[" + key + "]' is set to disallowed region: " + region,
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return violations
+}
+
+# Main validation logic
+all_violations = []
+
+# Run all validations
+all_violations += check_environment_variables()
+all_violations += validate_providers()
+all_violations += validate_region_variables()
+
+# Print detailed violation report
+if length(all_violations) > 0 {
+	print("========================================")
+	print("AWS Region Validation Policy Violations")
+	print("========================================")
+	print("Disallowed regions:", disallowed_regions)
+	print("")
+
+	for all_violations as violation {
+		print("❌", violation.message)
+		if "type" in keys(violation) {
+			print("   Type:", violation.type)
+		}
+		if "region" in keys(violation) and violation.region is not "undefined" {
+			print("   Region:", violation.region)
+		}
+		print("")
+	}
+
+	print("Total violations found:", length(all_violations))
+	print("========================================")
+}
+
+# Main rule - passes only if no violations found
 main = rule {
-  all tfplan.resource_changes as _, resource {
-    resource.change.after.tags is not null and
-    all required_tags as tag {
-      resource.change.after.tags[tag] is not null
-    }
-  }
+	length(all_violations) is 0
 }
