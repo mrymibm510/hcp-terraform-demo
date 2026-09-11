@@ -30,6 +30,7 @@ resource "aws_s3_bucket" "hercBucket" {
     ManagedBy   = "Terraform"
   }
 }
+
 resource "aws_s3_bucket" "rentalBucket" {
   bucket = "hercbucket21"
 
