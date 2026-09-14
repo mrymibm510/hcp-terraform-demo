@@ -40,3 +40,13 @@ resource "aws_s3_bucket" "rentalBucket" {
     ManagedBy   = "Terraform"
   }
 }
+
+  resource "aws_s3_bucket" "rentalBuckets" {
+  bucket = "hercbucket213"
+
+  tags = {
+    Name        = "MyDemoBucket3"
+    Environment = "dev"
+    ManagedBy   = "Terraform"
+  }
+}
