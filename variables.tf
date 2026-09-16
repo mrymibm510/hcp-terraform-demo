@@ -1,5 +1,5 @@
 variable "aws_region" {
-  default = "sa-east-1"
+  default = "us-wesst-2"
 } 
 
 variable "suffix" {
